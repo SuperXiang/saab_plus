@@ -1,5 +1,5 @@
-EXAMPLE
 dist/*
 MANIFEST
 build
 diagnostics.log
+lib/python/saab_plus/data/amino_sub

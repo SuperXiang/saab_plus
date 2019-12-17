@@ -1,4 +1,4 @@
-from Common.Common import get_sequence, numbered_datasets_location, number_sequence
+from Common.Common import get_sequence, numbered_datasets_location, number_sequence, chain_id_converter
 from Alignment.Align import align_sequences
 from Alignment.LoopAlignment import perform_loop_alignment, extract_cdrs
 from DataManagement.SAbDab import structural_reference
@@ -7,23 +7,37 @@ import numpy as np
 from scalop.inhouse_predict import _assign
 from string import ascii_letters
 import logging
+from collections import namedtuple
 
-formatDict= { "Light":{"CDR3":"L3","CDR1":"L1","CDR2":"L2"},
-              "Heavy":{"CDR3":"H3", "CDR1":"H1","CDR2":"H2" } 
-            }
+output_tuple = namedtuple("output_tuple",["CDR_H3_template",
+                                         "Canonical_classes",
+                                         "Redundancy",
+                                         "Framework_template",
+                                         "CDR_H3_sequence",
+                                         "ESS"])
 
-def parsecdr(numcdrseq):
-    "parsing CDRHs for SCALOP"
+format_dict= { 
+              "Light": {"CDR3": "L3",
+                        "CDR1": "L1",
+                        "CDR2": "L2"},
+              "Heavy": {"CDR3":"H3",
+                       "CDR1": "H1",
+                       "CDR2":"H2" } 
+              }
+
+
+def parsecdr( numcdrseq ):
+    "parsing CDRs for SCALOP"
     bigcdrseq = []
-    for pos,res in sorted(numcdrseq):
+    for pos, res in sorted( numcdrseq ):
         if pos[-1] in ascii_letters:
-            _pos = (int(pos[:-1]),pos[-1])
+            _pos = (int(pos[:-1]), pos[-1])
         else:
             _pos = (int(pos), ' ')
             bigcdrseq.append([_pos,res])
     return bigcdrseq
 
-def get_best_match(query,structures,region=None):
+def get_best_match(query, structures, region=None):
     """
     Finding the framework with the highest sequence identity
     """
@@ -36,7 +50,9 @@ def get_best_match(query,structures,region=None):
             """
             Here we get sids by sequence identity?	
             """
-            sid = align_sequences(query[0],structures[struc][0],region=region)
+            sid = align_sequences( query[0], 
+                                   structures[struc][0], 
+                                   region = region )
             if sid> curr_best_sid:
                 curr_best_sid = sid
                 curr_best_pdb = struc
@@ -59,29 +75,41 @@ def get_best_cdr_match( cdrs , fread_template, chain):
     pdb_template = fread_template[0:4]
     pdb_chain = fread_template[4]
 
-    if not cdrs.get("H3", None):
+    cdr_id_name = chain_id_converter[chain]
+    if not cdrs.get( cdr_id_name, None):
         return {}, 0
-    fread_results = perform_loop_alignment( "H3", pdb_template,
-                                            pdb_chain, cdrs["H3"])
+
+    fread_results = perform_loop_alignment( cdr_id_name, 
+                                            pdb_template,
+                                            pdb_chain, 
+                                            cdrs[ cdr_id_name ])
     if not fread_results:
         return {}, 0
-    maxESSminCA = findmaxESSminCA(fread_results)
+    maxESSminCA = findmaxESSminCA( fread_results )
     essScore = fread_results[maxESSminCA][1]["scr"]
-    results= { formatDict[chain]["CDR3"]:fread_results[maxESSminCA][1]["str"] }
+    results= { format_dict[chain]["CDR3"]: fread_results[maxESSminCA][1]["str"] }
+
     return results, essScore
 
-def fetch_canonicals(query):
+def fetch_canonicals(query, chain):
     """
     Function to structurally annotate canonical 
     classes.
     Passing numbered canonical class sequences
     """
+    
+    canonical_selection = {"Heavy": ["H1", "H2"],
+                           "Light": ["L1", "L2"]
+                           }
     can = {}
-    for canonical in ["H1", "H2"]:
-        if query.sequencemeta.get(canonical, None):
+    for canonical in canonical_selection[chain]:
+        if query.sequencemeta.get( canonical, None ):
             try:
-                _,_,_can,_ = _assign(parsecdr(query.sequencemeta[canonical].items()), canonical,
-                                                                        'imgt', 'imgt', 'latest')
+                _,_,_can,_ = _assign(parsecdr(query.sequencemeta[canonical].items()), 
+                                     canonical,
+                                     'imgt', 
+                                     'imgt', 
+                                     'latest')
                 can[canonical] = _can
             except:
                 can[canonical] = "None"
@@ -105,11 +133,13 @@ def init_fread(CDRSequences, full_results, chain):
              essScore - ESS score for the selected FREAD template
     """
     try:
-        fread_results, essScore = get_best_cdr_match( CDRSequences, full_results['best_pdb'], chain)
+        fread_results, essScore = get_best_cdr_match( CDRSequences, 
+                                                      full_results['best_pdb'], 
+                                                      chain )
     except:
         essScore = 0
         fread_results = False
-        logging.error("\tFREAD could not run: {0}".format(query.sequence))
+        logging.error("\tFREAD could not run: {0}".format( query.sequence ))
     return fread_results, essScore
 
 def align_single_sequence(queries, structures, chain):
@@ -118,41 +148,61 @@ def align_single_sequence(queries, structures, chain):
     with structural information.
     """
     output_dict = {}
+    cdr3_id_name = chain_id_converter[chain]
     for query in queries:
         fread_results = False
 
         #Get best framework pdb_template
-        full_results = get_best_match(query.numbering, 
-                                           structures)
-        CDRSequences = extract_cdrs(query.numbering[0])
-        CDR3Sequence = CDRSequences.get("H3", None)
+        full_results = get_best_match( query.numbering, 
+                                       structures)
+        CDRSequences = extract_cdrs( query.numbering[0], cdr3_id_name  )
+        CDR3Sequence = CDRSequences.get( cdr3_id_name, None )
+
+        # SCALOP
+        can = fetch_canonicals( query, chain ) 
+
         if "best_pdb" not in full_results:
             # if we cannot find framework match
-            output_dict[query.sequence] = ("None", can, query.sequencemeta["Redundancy"],
-                                           "None", CDR3Sequence, 0)
+            output_dict[ query.sequence ] = output_tuple( CDR_H3_template = "None",
+                                                          Canonical_classes = can,
+                                                          Redundancy = query.sequencemeta["Redundancy"],
+                                                          Framework_template = "None", 
+                                                          CDR_H3_sequence = CDR3Sequence, 
+                                                          ESS = 0 )
             continue
+
         # FREAD
         if CDR3Sequence:
-            fread_results, essScore = init_fread(CDRSequences, full_results, chain) 
+            fread_results, essScore = init_fread( CDRSequences, 
+                                                  full_results, 
+                                                  chain ) 
         else:
             essScore = 0
             CDR3Sequence = ""
 
-        # SCALOP
-        can = fetch_canonicals(query) 
-
         # Recording outputs
         try:
             if fread_results:
-                output_dict[query.sequence] = (fread_results[formatDict[chain]["CDR3"]], can, 
-                                         query.sequencemeta["Redundancy"], full_results['best_pdb'], 
-                                         CDR3Sequence, essScore)
+                output_dict[query.sequence] = output_tuple( CDR_H3_template = fread_results[format_dict[chain]["CDR3"]],
+                                                            Canonical_classes = can,
+                                                            Redundancy = query.sequencemeta["Redundancy"], 
+                                                            Framework_template = full_results['best_pdb'],
+                                                            CDR_H3_sequence = CDR3Sequence, 
+                                                            ESS = essScore )
             else:
-                output_dict[query.sequence] = ("None", can, query.sequencemeta["Redundancy"], 
-                                               full_results['best_pdb'], CDR3Sequence, essScore)
+                output_dict[query.sequence] = output_tuple( CDR_H3_template = "None",
+                                                            Canonical_classes = can,
+                                                            Redundancy = query.sequencemeta["Redundancy"], 
+                                                            Framework_template = full_results['best_pdb'],
+                                                            CDR_H3_sequence = CDR3Sequence, 
+                                                            ESS = essScore )
         except IndexError:
-            output_dict[query.sequence] = ("None", can, query.sequencemeta["Redundancy"], 
-                                           full_results['best_pdb'], CDR3Sequence, essScore)
+            output_dict[query.sequence] = output_tuple( CDR_H3_template = "None",
+                                                        Canonical_classes = can,
+                                                        Redundancy = query.sequencemeta["Redundancy"], 
+                                                        Framework_template = full_results['best_pdb'],
+                                                        CDR_H3_sequence = CDR3Sequence, 
+                                                        ESS = essScore )
     return (output_dict, "_")
 
 if __name__ == '__main__':
